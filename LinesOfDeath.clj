@@ -1,14 +1,25 @@
-(def width 400)
-(def height 400)
+(def width 1024)
+(def height 768)
 
 (def windspeed (atom [-2 0]))
-(def weather-line-speed (atom -4))
-(def player-speed (atom 4))
+
+(def weatherlines (atom []))
+(def weather-line-speed (atom 7))
+(def weather-line-speed-timer (atom 0))
+
+(def position (atom [0 (/ width 2)]))
+(def displacement (atom [0 0]))
+(def player-speed (atom 6))
+(def player-radius (atom 14))
+
+(def enemy-position (atom [(rand width) (rand height)]))
+(def enemy-displacement (atom [0 0]))
+(def enemy-speed (atom 2))
+
+(def covered-extents (atom [0 0]))
+
 (def score (atom 0))
 (def death-count (atom 0))
-(def position (atom [0 (/ width 2)]))
-(def weatherlines (atom []))
-(def displacement (atom [0 0]))
 
 (defn initialize-game[]
   (reset! weatherlines [])
@@ -24,16 +35,22 @@
     )
   )
   (reset! position [0 (/ width 2)])
+  (reset! weather-line-speed 4)
+  (reset! weather-line-speed-timer 0)
+  (let [py (second @position)]
+    (reset! covered-extents [py (+ 1 py)])
+  )
 )
 
 (def gamelooper (agent true))
 (def weathermanager (agent true))
 (def playermanager (agent true))
+(def enemymanager (agent true))
 
 (defn drawCharacter [g2d x y]
   (. g2d setColor java.awt.Color/white)
   (. g2d fillOval (- x 1) (- y 1) 27 27)
-  (. g2d setColor java.awt.Color/red)
+  (. g2d setColor java.awt.Color/green)
   (. g2d fillOval x y 25 25)
   (. g2d setColor java.awt.Color/black)
   (. g2d fillOval (+ x 8) (+ y 3) 7 7)
@@ -47,20 +64,55 @@
   (. g2d fillOval (+ x 15) (+ y 15) 8 3)
 )
 
+(defn drawEnemy[g2d x y]
+  (. g2d setColor java.awt.Color/white)
+  (. g2d fillOval (- x 1) (- y 1) 27 27)
+  (. g2d setColor java.awt.Color/red)
+  (. g2d fillOval x y 25 25)
+)
+
 (defn drawWeather [g2d]
-  (dorun (map #(. g2d drawLine (first %) (second %) (+ (first %) (nth % 2)) (second %) ) @weatherlines))
+  (dorun 
+    (map 
+      #(. g2d drawLine (first %) (second %) (+ (first %) (nth % 2)) (second %) )
+      @weatherlines
+    )
+  )
 )
 
 (defn draw [g2d]
   (. g2d setColor java.awt.Color/black)
   (. g2d fillRect 0 0 width height)
+
+  (let [[miny maxy] @covered-extents]
+    (if (and (< miny 25) 
+             (> maxy (- height 30))) 
+      (. g2d setColor java.awt.Color/green)
+      (. g2d setColor java.awt.Color/red))
+    (. g2d fillRect (- width (/ width 20)) miny 
+                    (/ width 20) (- (+ 30 maxy) miny))
+    (if (< miny 25)  
+      (. g2d setColor java.awt.Color/green)
+      (. g2d setColor java.awt.Color/red))
+    (. g2d fillRect (- width (/ width 20)) 15 (/ width 20) 10)
+
+    (if (> maxy (- height 30)) 
+      (. g2d setColor java.awt.Color/green)
+      (. g2d setColor java.awt.Color/red))
+    (. g2d fillRect (- width (/ width 20)) (- height 30) (/ width 20) 10)
+  )
+
   (. g2d setColor java.awt.Color/blue)
   (drawWeather g2d)
   (. g2d setColor java.awt.Color/white)
-  (. g2d drawString (str "Successful Crosses: " @score) 3 10)
+  (. g2d drawString (str "Score: " (int @score)) 3 10)
+  (. g2d drawString (str "Speed: " @weather-line-speed) 300 10)
+  (. g2d drawString (str "Speed Timer: " @weather-line-speed-timer) 300 20)
   (. g2d drawString (str "Deaths: " @death-count) (- width 70) 10) 
   (let [ [x y] @position ]
     (drawCharacter g2d x y))
+  (let [ [x y] @enemy-position ]
+    (drawEnemy g2d x y))
 )
 
 (def frame (new javax.swing.JFrame))
@@ -98,8 +150,13 @@
   )
 )
 
-                    
-  
+(defn intersect-circular[uppl1 uppl2 r]
+  (let [ [x1 y1] (map #(+ % r) uppl1)]
+    (let [ [x2 y2] (map #(+ % r) uppl2)]
+      (let [x-intersect (and (> x1 (- x2 r)) (< x1 (+ x2 r)))]
+        (let [y-intersect (and (> y1 (- y2 r)) (< y1 (+ y2 r)))]
+          (and x-intersect y-intersect)))))
+)
 
 (defn player[running] 
   (when running 
@@ -108,13 +165,29 @@
   (dosync
     (let [ [x y] @position]
       (let [ [deltax deltay] @displacement]
-        (let [xwrap (> (+ deltax x) width)]
-          (let [ywrap (> (+ deltay y) height)]
-            (reset! position [(if xwrap 0 (+ deltax x)) 
-                              (if ywrap 0 (+ deltay y))]
-            )
-            (when xwrap 
-              (reset! score (+ 1 @score))
+        (let [ [newx newy] [(+ deltax x) (+ deltay y)] ]
+          (let [xwrap (> newx width)]
+            (let [ywrap (> newy (- height 30))]
+              (let [yunwrap (< newy 20)]
+                (let [ywrapnewval (if ywrap y newy)]
+                  (let [newpos (vector (if xwrap 0 newx) (if yunwrap y ywrapnewval))]
+                    (reset! position newpos)
+                  )
+                )
+              )
+              (let [[miny maxy] @covered-extents]
+                (let [new-min (if (< newy miny) newy miny)]
+                  (let [new-max (if (> newy maxy) newy maxy)]
+                    (println (str "max: " new-max "min: " new-min))
+                    (reset! covered-extents (vector new-min new-max))
+                    (when (and xwrap 
+                               (and (< new-min 25) (> new-max (- height 31))))
+                      (reset! score (+ @weather-line-speed @score))
+                      (reset! covered-extents [newy newy])
+                    )
+                  )
+                )
+              )
             )
           )
         )
@@ -130,13 +203,44 @@
     (reset! death-count (+ 1 @death-count))
     (initialize-game)
   )
+  
+
+  (. Thread sleep 30)
+  running 
+)
+
+(defn enemy[running] 
+  (when running 
+    (send-off *agent* #'enemy))
+
+  (let [ [x y]  @enemy-position]
+    (let [ [px py] @position]
+      (let [ esp @enemy-speed ]
+        (let [newx (if (<= x px) (+ x esp) (- x esp))]
+          (let [newy (if (<= y py) (+ y esp) (- y esp))]
+            (reset! enemy-position (vector (if (> newx width) (- width 1) newx)
+                                           (if (> newy height)(- height 1) newy))
+            )
+          )
+        )
+      )
+    )
+  )
+
+  (when 
+    (intersect-circular @position @enemy-position @player-radius)
+    (println (str "score: " @score))
+    (let [newscore (- @score 0.05)]
+      (reset! score newscore))
+  )
+
 
   (. Thread sleep 30)
   running 
 )
 
 (defn update-weather-line[s] 
-  (let [oneless (dec (first s))] 
+  (let [oneless (- (first s) @weather-line-speed)] 
     (let [wrap (< oneless 0)]
       (vector 
         (if wrap width oneless)  
@@ -156,6 +260,12 @@
                @weatherlines
           )
   )
+  (reset! weather-line-speed-timer (inc @weather-line-speed-timer))
+  (when (> @weather-line-speed-timer 500)
+    (reset! weather-line-speed (inc @weather-line-speed))
+    (reset! weather-line-speed-timer 0)
+  )
+    
  
   (dosync
     (let [ [x y] @position]
@@ -226,3 +336,6 @@
 
 (send playermanager (fn [x] true))
 (send-off playermanager player)
+
+(send enemymanager (fn [x] true))
+(send-off enemymanager enemy)
